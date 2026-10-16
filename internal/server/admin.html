@@ -222,6 +222,7 @@ function renderAccounts(accts){
       + '<td><div class="row-actions">'
       + '<label class="toggle"><input type="checkbox" '+toggleChecked+' '+toggleDisabled+' onchange="toggleAcct(\''+esc(a.uid)+'\', this.checked)"><span class="slider"></span></label>'
       + '<button class="btn sm" onclick="refreshAcct(\''+esc(a.uid)+'\')">刷新token</button>'
+      + '<button class="btn sm" onclick="checkinAcct(\''+esc(a.uid)+'\')">立即签到</button>'
       + '<button class="btn sm" onclick="showJSON(\''+esc(a.uid)+'\')">JSON</button>'
       + '<button class="btn sm danger" onclick="deleteAcct(\''+esc(a.uid)+'\')">删除</button>'
       + '</div></td>'
@@ -244,6 +245,17 @@ async function refreshAcct(uid){
     method:'POST', headers: authHeader()
   });
   if(!r.ok){ const e = await r.json().catch(()=>({})); alert('刷新失败：'+apiErr(e)); }
+  loadAccounts();
+}
+async function checkinAcct(uid){
+  const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid)+'/checkin', {
+    method:'POST', headers: authHeader()
+  });
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){ alert('签到失败：'+apiErr(d)); loadAccounts(); return; }
+  if(d.claimed) alert('签到成功：+'+(d.checkin_credits||0)+' 积分');
+  else if(d.checked_in) alert('今日已经签到过了');
+  else alert('当前不可签到');
   loadAccounts();
 }
 async function deleteAcct(uid){

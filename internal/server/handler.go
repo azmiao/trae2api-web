@@ -84,6 +84,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("DELETE /admin/api/accounts/{uid}", h.withAdminAuth(h.adminDeleteAccount))
 	h.mux.HandleFunc("PATCH /admin/api/accounts/{uid}", h.withAdminAuth(h.adminPatchAccount))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/refresh", h.withAdminAuth(h.adminRefreshAccount))
+	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/checkin", h.withAdminAuth(h.adminCheckinAccount))
 	h.mux.HandleFunc("GET /admin/api/accounts/{uid}/json", h.adminAccountJSON)
 	// Web 登录闭环
 	h.mux.HandleFunc("POST /admin/api/login", h.withAdminAuth(h.adminLoginStart))

@@ -317,6 +317,57 @@ func (h *Handler) adminRefreshAccount(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// adminCheckinAccount POST /admin/api/accounts/{uid}/checkin：立即查询并执行签到。
+func (h *Handler) adminCheckinAccount(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	st, ok := h.cfg.Pool.Status(uid)
+	if !ok {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "account not found")
+		return
+	}
+	if st.Disabled {
+		writeOpenAIError(w, http.StatusConflict, "account_disabled", "account is disabled")
+		return
+	}
+	a := h.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "no auth for uid")
+		return
+	}
+
+	checkedIn, checkinCredits, checkinEnable, err := h.cfg.Upstream.CheckinStatus(a)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "checkin_status_failed", err.Error())
+		return
+	}
+	claimed := false
+	if !checkedIn && checkinEnable {
+		if err := h.cfg.Upstream.CheckinClaim(a); err != nil {
+			writeOpenAIError(w, http.StatusBadGateway, "checkin_failed", err.Error())
+			return
+		}
+		claimed = true
+		checkedIn = true
+	}
+
+	remain, err := h.cfg.Upstream.UserEntUsage(a)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "credits_failed", err.Error())
+		return
+	}
+	h.cfg.Pool.ReenableIfCredits(uid, remain)
+	st, _ = h.cfg.Pool.Status(uid)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"uid":             uid,
+		"checked_in":      checkedIn,
+		"checkin_credits": checkinCredits,
+		"checkin_enable":  checkinEnable,
+		"claimed":         claimed,
+		"credits":         remain,
+		"status":          st,
+	})
+}
+
 // adminAccountJSON GET /admin/api/accounts/{uid}/json：脱敏预览（只读，无鉴权但严格脱敏）。
 func (h *Handler) adminAccountJSON(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
