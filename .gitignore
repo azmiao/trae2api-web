@@ -32,3 +32,4 @@ __pycache__/
 # 任务输入文档
 tickets/
 reference_workbuddy2api/
+.openbitfun/
