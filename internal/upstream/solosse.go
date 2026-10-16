@@ -35,11 +35,12 @@ import (
 
 // SOLOEvent 单条 SOLO SSE 事件（归一化）。
 type SOLOEvent struct {
-	Event        string          // metadata | timing_cost | output | extra_info | token_usage | done | error
+	Event        string          // metadata | timing_cost | output | extra_info | token_usage | notify_usage | done | error
 	Response     string          // output: content 增量
 	Reasoning    string          // output: 思考链增量
 	ToolCalls    json.RawMessage // output: 工具调用（null 或对象/数组）
 	Usage        map[string]any  // token_usage
+	IDECredits   int64           // notify_usage: SOLO 剩余 ide_credits（-1 = 未捕获）
 	FinishReason string          // done
 	ErrorCode    int64           // error
 	ErrorMessage string          // error
@@ -66,7 +67,7 @@ func (e *SOLOStreamError) Kind() ErrKind {
 
 // ParseSOLOLine 解析一条事件（eventName 为 event 行值，dataLine 为 data 行值）。
 func ParseSOLOLine(eventName, dataLine string) (*SOLOEvent, error) {
-	ev := &SOLOEvent{Event: strings.TrimSpace(eventName)}
+	ev := &SOLOEvent{Event: strings.TrimSpace(eventName), IDECredits: -1}
 	if dataLine == "" {
 		return ev, nil
 	}
@@ -87,6 +88,8 @@ func ParseSOLOLine(eventName, dataLine string) (*SOLOEvent, error) {
 		}
 	case "token_usage":
 		ev.Usage = raw
+	case "notify_usage":
+		ev.IDECredits = extractIDECredits(raw)
 	case "done":
 		if v, ok := raw["finish_reason"].(string); ok {
 			ev.FinishReason = v
@@ -100,6 +103,35 @@ func ParseSOLOLine(eventName, dataLine string) (*SOLOEvent, error) {
 		}
 	}
 	return ev, nil
+}
+
+// extractIDECredits 从 notify_usage 中提取 SOLO 实际剩余 ide_credits。
+// 兼容字符串/数值字段，上游结构缺失时返回 -1（表示未捕获）。
+func extractIDECredits(raw map[string]any) int64 {
+	if info, ok := raw["cn_credits_remain_info"].(map[string]any); ok {
+		if n, ok := asInt64(info["ide_credits"]); ok {
+			return n
+		}
+	}
+	return -1
+}
+
+func asInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case string:
+		var parsed int64
+		if _, err := fmt.Sscanf(n, "%d", &parsed); err != nil {
+			return 0, false
+		}
+		return parsed, true
+	}
+	return 0, false
 }
 
 // sseState 维护一行 SSE 的 event/data 跨行累积。
@@ -141,6 +173,11 @@ func scanLine(st *sseState, line string) *SOLOEvent {
 // Aggregate 读取完整 SOLO SSE，聚合 response + reasoning + tool_calls + usage，
 // 产出单个 OpenAI chat.completion（非流式）。
 func Aggregate(r io.Reader) (map[string]any, error) {
+	return aggregateWithNotify(r, nil)
+}
+
+// aggregateWithNotify 非流式聚合；onNotifyUsage 捕获到 notify_usage.ide_credits 时回调。
+func aggregateWithNotify(r io.Reader, onNotifyUsage func(int64)) (map[string]any, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var (
 		id           string
@@ -170,6 +207,10 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 				mergeToolCallJSON(toolCalls, &toolOrder, ev.ToolCalls)
 			case "token_usage":
 				usage = ev.Usage
+			case "notify_usage":
+				if ev.IDECredits >= 0 && onNotifyUsage != nil {
+					onNotifyUsage(ev.IDECredits)
+				}
 			case "done":
 				if ev.FinishReason != "" {
 					finishReason = ev.FinishReason
@@ -220,6 +261,11 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		resp["usage"] = usage
 	}
 	return resp, nil
+}
+
+// AggregateWithNotify 同 Aggregate，额外在遇到 notify_usage.ide_credits 时回调（供调用方更新账号积分）。
+func AggregateWithNotify(r io.Reader, onNotifyUsage func(int64)) (map[string]any, error) {
+	return aggregateWithNotify(r, onNotifyUsage)
 }
 
 // mergeToolCallJSON 把 SOLO output.tool_calls（json.RawMessage，可能 null/对象/数组）
@@ -305,17 +351,22 @@ func sortInts(a []int) {
 // Stream 流式转换：SOLO SSE → OpenAI SSE chunk，每 chunk flush，保证至少一个 [DONE]。
 // 调用方必须先设置过 status 200；本函数自设 SSE headers。
 func Stream(w http.ResponseWriter, r io.Reader) error {
-	return streamOpts(w, r, nil)
+	return streamOpts(w, r, nil, nil)
 }
 
 // StreamWithError 同 Stream，额外在遇到上游 event:error 时回调 onErr（非 nil），
 // 供调用方冷却账号/记录日志；错误信息同时注入 SSE 事件流。
 func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)) error {
-	return streamOpts(w, r, onErr)
+	return streamOpts(w, r, onErr, nil)
+}
+
+// StreamWithObserve 同 StreamWithError，额外在遇到 notify_usage.ide_credits 时回调。
+func StreamWithObserve(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError), onNotifyUsage func(int64)) error {
+	return streamOpts(w, r, onErr, onNotifyUsage)
 }
 
 // streamOpts Stream 的可选参数版本。
-func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)) error {
+func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError), onNotifyUsage func(int64)) error {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -408,6 +459,10 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 				}
 			case "token_usage":
 				pendingUsage = ev.Usage
+			case "notify_usage":
+				if ev.IDECredits >= 0 && onNotifyUsage != nil {
+					onNotifyUsage(ev.IDECredits)
+				}
 			case "done":
 				if err := writeChunk(map[string]any{}, ev.FinishReason); err != nil {
 					return err

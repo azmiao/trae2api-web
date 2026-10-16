@@ -223,6 +223,7 @@ function renderAccounts(accts){
       + '<label class="toggle"><input type="checkbox" '+toggleChecked+' '+toggleDisabled+' onchange="toggleAcct(\''+esc(a.uid)+'\', this.checked)"><span class="slider"></span></label>'
       + '<button class="btn sm" onclick="refreshAcct(\''+esc(a.uid)+'\')">刷新token</button>'
       + '<button class="btn sm" onclick="checkinAcct(\''+esc(a.uid)+'\')">立即签到</button>'
+      + '<button class="btn sm" onclick="refreshCredits(\''+esc(a.uid)+'\')">刷新积分</button>'
       + '<button class="btn sm" onclick="showJSON(\''+esc(a.uid)+'\')">JSON</button>'
       + '<button class="btn sm danger" onclick="deleteAcct(\''+esc(a.uid)+'\')">删除</button>'
       + '</div></td>'
@@ -256,6 +257,16 @@ async function checkinAcct(uid){
   if(d.claimed) alert('签到成功：+'+(d.checkin_credits||0)+' 积分');
   else if(d.checked_in) alert('今日已经签到过了');
   else alert('当前不可签到');
+  loadAccounts();
+  loadCredits();
+}
+async function refreshCredits(uid){
+  const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid)+'/credits/refresh', {
+    method:'POST', headers: authHeader()
+  });
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){ alert('刷新积分失败：'+apiErr(d)); return; }
+  alert('刷新成功，剩余积分：'+fmt(d.credits));
   loadAccounts();
 }
 async function deleteAcct(uid){
@@ -374,6 +385,8 @@ function renderCredits(d){
 }
 async function loadCredits(){
   try{
+    // 先触发后台批量刷新，再拉取展示
+    await fetch('/admin/api/credits/refresh', {method:'POST', headers: authHeader()}).catch(()=>{});
     const r = await fetch('/admin/api/credits', {cache:'no-store'});
     renderCredits(await r.json());
   }catch(e){

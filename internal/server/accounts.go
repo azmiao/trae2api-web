@@ -1,4 +1,4 @@
-﻿// accounts.go /admin/api/accounts 全套：列表 / 导入 / 删除 / PATCH 开关 / 刷新 / JSON 脱敏预览。
+// accounts.go /admin/api/accounts 全套：列表 / 导入 / 删除 / PATCH 开关 / 刷新 / JSON 脱敏预览。
 //
 // 安全纪律（PLAN §4）：
 //   - 列表与 JSON 预览绝不返回完整 token，只给前缀 + 长度
@@ -29,11 +29,11 @@ type accountSummary struct {
 	Credits      int64  `json:"credits"`
 	ErrCount     int    `json:"err_count,omitempty"`
 	// Token 有效期（Unix 秒）与是否临近过期
-	ExpiresAt    int64  `json:"expires_at,omitempty"`
-	ExpiredSoon  bool   `json:"expired_soon,omitempty"`
-	MachineID    string `json:"machine_id,omitempty"` // 前 8 位（脱敏）
-	DeviceID     string `json:"device_id,omitempty"`  // 前 8 位（脱敏）
-	HasAuth      bool   `json:"has_auth"`
+	ExpiresAt   int64  `json:"expires_at,omitempty"`
+	ExpiredSoon bool   `json:"expired_soon,omitempty"`
+	MachineID   string `json:"machine_id,omitempty"` // 前 8 位（脱敏）
+	DeviceID    string `json:"device_id,omitempty"`  // 前 8 位（脱敏）
+	HasAuth     bool   `json:"has_auth"`
 }
 
 // adminAccounts GET /admin/api/accounts：列表（无鉴权，只读）。
@@ -42,14 +42,14 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
 	out := make([]accountSummary, 0, len(statuses))
 	for _, s := range statuses {
 		sum := accountSummary{
-			UID:       s.UID,
-			Nickname:  s.Nickname,
-			Enabled:   s.Enabled,
-			Disabled:  s.Disabled,
-			Cooling:   s.Cooling,
-			Reason:    s.Reason,
-			Credits:   s.Credits,
-			ErrCount:  s.ErrCount,
+			UID:      s.UID,
+			Nickname: s.Nickname,
+			Enabled:  s.Enabled,
+			Disabled: s.Disabled,
+			Cooling:  s.Cooling,
+			Reason:   s.Reason,
+			Credits:  s.Credits,
+			ErrCount: s.ErrCount,
 		}
 		if a := h.cfg.Pool.AuthByUID(s.UID); a != nil {
 			sum.HasAuth = true
@@ -80,10 +80,10 @@ type importRequest struct {
 
 // importResult 导入结果。
 type importResult struct {
-	UID       string `json:"uid"`
-	Nickname  string `json:"nickname,omitempty"`
-	Action    string `json:"action"` // "created" | "updated"
-	NeedsCheck bool  `json:"needs_check,omitempty"` // 建议用户确认额度
+	UID        string `json:"uid"`
+	Nickname   string `json:"nickname,omitempty"`
+	Action     string `json:"action"`                // "created" | "updated"
+	NeedsCheck bool   `json:"needs_check,omitempty"` // 建议用户确认额度
 }
 
 // adminImportAccount POST /admin/api/accounts/import：导入凭证。
@@ -161,8 +161,8 @@ func (h *Handler) importFromCallback(req importRequest) (*auth.Auth, error) {
 	a := &auth.Auth{
 		AccessToken:  info.AccessToken,
 		RefreshToken: info.RefreshToken,
-		UID:         info.UID,
-		Nickname:    info.Nickname,
+		UID:          info.UID,
+		Nickname:     info.Nickname,
 		EnterpriseID: info.EnterpriseID,
 		Domain:       "trae.cn",
 		ApiHost:      "https://api.trae.com.cn",
@@ -311,9 +311,9 @@ func (h *Handler) adminRefreshAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	st, _ := h.cfg.Pool.Status(uid)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"uid":       uid,
+		"uid":        uid,
 		"expires_at": a.ExpiresAt,
-		"status":    st,
+		"status":     st,
 	})
 }
 
@@ -365,6 +365,46 @@ func (h *Handler) adminCheckinAccount(w http.ResponseWriter, r *http.Request) {
 		"claimed":         claimed,
 		"credits":         remain,
 		"status":          st,
+	})
+}
+
+// adminRefreshCredits POST /admin/api/accounts/{uid}/credits/refresh：手动刷新缓存积分。
+// 优先使用 pool 缓存的 SOLO ide_credits；未缓存时回退 entitlement 聚合额度并提示。
+func (h *Handler) adminRefreshCredits(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	st, ok := h.cfg.Pool.Status(uid)
+	if !ok {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "account not found")
+		return
+	}
+	a := h.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "no auth for uid")
+		return
+	}
+
+	// pool 已有缓存的 ide_credits（来自聊天响应的 notify_usage）→ 直接返回
+	if st.Credits > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"uid":     uid,
+			"credits": st.Credits,
+			"source":  "cached_ide_credits",
+		})
+		return
+	}
+
+	// 尚未缓存 → 回退 entitlement 聚合（注意：该值可能含 work_credits，不代表 SOLO 实际可用）
+	remain, err := h.cfg.Upstream.UserEntUsage(a)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "credits_failed", err.Error())
+		return
+	}
+	h.cfg.Pool.SetCredits(uid, remain)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"uid":     uid,
+		"credits": remain,
+		"source":  "entitlement_fallback",
+		"notice":  "缓存的 SOLO 额度尚未建立，已回退查询权益包额度；执行一次对话后可获取真实 ide_credits",
 	})
 }
 

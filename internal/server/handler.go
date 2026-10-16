@@ -1,4 +1,4 @@
-﻿// Package server 暴露 OpenAI 兼容 HTTP 接口，内部驱动 pool 挑号 + upstream 转发。
+// Package server 暴露 OpenAI 兼容 HTTP 接口，内部驱动 pool 挑号 + upstream 转发。
 package server
 
 import (
@@ -42,7 +42,7 @@ type Handler struct {
 	// Web 登录 pending 态：pendingID → 登录进行中的临时上下文。
 	// 回调 /authorize 捕获后标记成功；面板轮询 result 取结果。
 	loginMu sync.Mutex
-	logins   map[string]*pendingLogin
+	logins  map[string]*pendingLogin
 }
 
 // NewHandler 构建 handler。
@@ -78,6 +78,7 @@ func NewHandler(cfg Config) *Handler {
 	// 经 withAdminAuth 校验 Bearer = TW2A_API_KEY（见 §4 安全设计）。
 	h.mux.HandleFunc("GET /admin", h.adminPage)
 	h.mux.HandleFunc("GET /admin/api/credits", h.adminCredits)
+	h.mux.HandleFunc("POST /admin/api/credits/refresh", h.withAdminAuth(h.adminCreditsRefreshAll))
 	// 账号 CRUD
 	h.mux.HandleFunc("GET /admin/api/accounts", h.adminAccounts)
 	h.mux.HandleFunc("POST /admin/api/accounts/import", h.withAdminAuth(h.adminImportAccount))
@@ -85,6 +86,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("PATCH /admin/api/accounts/{uid}", h.withAdminAuth(h.adminPatchAccount))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/refresh", h.withAdminAuth(h.adminRefreshAccount))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/checkin", h.withAdminAuth(h.adminCheckinAccount))
+	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/credits/refresh", h.withAdminAuth(h.adminRefreshCredits))
 	h.mux.HandleFunc("GET /admin/api/accounts/{uid}/json", h.adminAccountJSON)
 	// Web 登录闭环
 	h.mux.HandleFunc("POST /admin/api/login", h.withAdminAuth(h.adminLoginStart))
@@ -419,14 +421,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if peek.Stream {
 			h.cfg.Pool.NoteSuccess(acct.UID)
-			// 流内业务错误（1005 plan/5xx 等）→ 冷却账号，错误信息注入 SSE。
-			_ = upstream.StreamWithError(w, rc, func(se *upstream.SOLOStreamError) {
+			// 流内业务错误（1005 plan/5xx 等）→ 冷却账号，错误信息注入 SSE；
+			// notify_usage.ide_credits → 更新账号池缓存的真实 SOLO 剩余积分。
+			_ = upstream.StreamWithObserve(w, rc, func(se *upstream.SOLOStreamError) {
 				h.handleStreamError(acct.UID, se)
+			}, func(ideCredits int64) {
+				h.cfg.Pool.SetCredits(acct.UID, ideCredits)
 			})
 			rc.Close()
 			return
 		}
-		resp, err := upstream.Aggregate(rc)
+		resp, err := upstream.AggregateWithNotify(rc, func(ideCredits int64) {
+			h.cfg.Pool.SetCredits(acct.UID, ideCredits)
+		})
 		rc.Close() // 已完全消费，立即释放上游连接（防轮转 continue 泄漏 body）
 		if err != nil {
 			// 流内业务错误（如 1005 plan 权益不足）→ 冷却账号并轮转下一账号。
