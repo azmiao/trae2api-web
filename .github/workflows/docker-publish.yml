@@ -71,11 +71,12 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           flavor: latest=false
+          # Push latest last so GHCR uses it in the default install command.
           tags: |
             type=ref,event=branch
             type=ref,event=tag
             type=sha,format=long
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,priority=50,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push image
         id: build
