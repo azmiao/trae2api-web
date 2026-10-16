@@ -71,12 +71,10 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           flavor: latest=false
-          # Push latest last so GHCR uses it in the default install command.
           tags: |
             type=ref,event=branch
             type=ref,event=tag
             type=sha,format=long
-            type=raw,value=latest,priority=50,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push image
         id: build
@@ -91,6 +89,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # GHCR features the newest digest, not necessarily the last tag pushed.
+      - name: Publish latest as a separate image index
+        if: github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.version=latest" \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}@${DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:latest"
+          diff \
+            <(docker buildx imagetools inspect --raw "${IMAGE}@${DIGEST}" | jq -S '.manifests') \
+            <(docker buildx imagetools inspect --raw "${IMAGE}:latest" | jq -S '.manifests')
+
       - name: Write image summary
         env:
           IMAGE: ${{ steps.image.outputs.name }}
@@ -101,11 +116,14 @@ jobs:
             echo '## Published Docker image'
             echo
             printf 'Image: `%s`\n\n' "$IMAGE"
-            printf 'Digest: `%s`\n\n' "$DIGEST"
+            printf 'Build digest: `%s`\n\n' "$DIGEST"
             echo 'Platforms: `linux/amd64`, `linux/arm64`'
             echo
             echo 'Tags:'
             printf '%s\n' "$TAGS" | while IFS= read -r tag; do
               printf -- '- `%s`\n' "$tag"
             done
+            if [[ "$GITHUB_REF" == 'refs/heads/main' ]]; then
+              printf -- '- `%s:latest` (separate index, same platform manifests)\n' "$IMAGE"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
