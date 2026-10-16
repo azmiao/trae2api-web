@@ -4,6 +4,12 @@ docs/
 *.key
 *.pem
 .git/
+.github/
+.openbitfun/
+.idea/
+.vscode/
+tickets/
+reference_workbuddy2api/
 .gitignore
 README.md
 config.json
